@@ -2,6 +2,11 @@
 name = "simplezarr"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+authors = ["Benjamin Sobel <bsobel@you2date.com>"]
+repository = "https://github.com/UserNobody14/simplezarr"
+description = "A simple Zarr (V2) implementation in Rust"
+readme = "README.md"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
