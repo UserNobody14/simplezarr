@@ -4,8 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::array::{
-    ChunkGetter, CompressionInfo, UnifiedMetadata, UnifiedZarrArray, load_array, load_array_value,
-    parse_chunk,
+    ChunkGetterFn, CompressionInfo, UnifiedMetadata, UnifiedZarrArray, parse_chunk,
 };
 use crate::codecs::AnyCodec;
 use crate::codecs::blosc::{BloscCname, BloscCodec, BloscShuffle};
@@ -155,7 +154,7 @@ fn create_v2_chunk_getter<S: StorageBackend + 'static>(
     store: Arc<S>,
     base_path: String,
     md: ZarrV2Metadata,
-) -> ChunkGetter {
+) -> ChunkGetterFn {
     let codecs = get_codec_equivalents(&md);
     let md = Arc::new(md);
     let codecs = Arc::new(codecs);
@@ -231,14 +230,14 @@ pub async fn open<S: StorageBackend + 'static>(
 
     Ok(UnifiedZarrArray {
         metadata: unified_md,
-        get_chunk: getter,
+        chunk_getter: getter,
     })
 }
 
 /// Open and load a V2 array, returning a flat `Vec<f64>`.
 pub async fn load<S: StorageBackend + 'static>(store: Arc<S>, path: &str) -> ZarrResult<Vec<f64>> {
     let array = open(store, path).await?;
-    load_array(&array).await
+    array.load().await
 }
 
 /// Open and load a V2 array, preserving element types.
@@ -247,7 +246,7 @@ pub async fn load_value<S: StorageBackend + 'static>(
     path: &str,
 ) -> ZarrResult<ZarrVectorValue> {
     let array = open(store, path).await?;
-    load_array_value(&array).await
+    array.load_value().await
 }
 
 /// Open a group of V2 arrays. Tries `.zmetadata` (consolidated) first,
@@ -294,7 +293,7 @@ pub async fn open_group<S: StorageBackend + 'static>(
                     name.clone(),
                     UnifiedZarrArray {
                         metadata: unified_md,
-                        get_chunk: getter,
+                        chunk_getter: getter,
                     },
                 );
             }

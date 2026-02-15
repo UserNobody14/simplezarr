@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use simplezarr::array::{UnifiedZarrArray, load_array, load_array_value};
+use simplezarr::array::UnifiedZarrArray;
 use simplezarr::error::ZarrResult;
 use simplezarr::store::LocalBackend;
 use simplezarr::v2;
@@ -102,7 +102,8 @@ async fn assert_first_chunk_readable(dataset: &str, var: &str) {
     let md = &arr.metadata;
     let first_key: Vec<usize> = vec![0; md.shape.len()];
 
-    let chunk = (arr.get_chunk)(first_key)
+    let chunk = arr
+        .get_chunk(&first_key)
         .await
         .unwrap_or_else(|e| panic!("fetch chunk {dataset}/{var}: {e}"));
 
@@ -174,7 +175,8 @@ async fn first_chunk_f64(var: &str) -> Vec<f64> {
         .unwrap_or_else(|e| panic!("open constant/{var}: {e}"));
 
     let first_key: Vec<usize> = vec![0; arr.metadata.shape.len()];
-    let chunk = (arr.get_chunk)(first_key)
+    let chunk = arr
+        .get_chunk(&first_key)
         .await
         .unwrap_or_else(|e| panic!("fetch chunk constant/{var}: {e}"));
 
@@ -233,7 +235,7 @@ async fn load_full_constant_temperature() {
         .await
         .expect("open constant/2m_temperature");
 
-    let data = load_array(&arr).await.expect("load_array");
+    let data = arr.load().await.expect("load");
 
     // Total elements: 3 * 10 * 400 * 400 = 4_800_000
     assert_eq!(data.len(), 3 * 10 * 400 * 400);
@@ -251,7 +253,7 @@ async fn load_full_constant_precipitation() {
         .await
         .expect("open constant/total_precipitation");
 
-    let data = load_array(&arr).await.expect("load_array");
+    let data = arr.load().await.expect("load");
 
     assert_eq!(data.len(), 3 * 10 * 400 * 400);
 
@@ -268,7 +270,7 @@ async fn load_value_preserves_type() {
         .await
         .expect("open");
 
-    let value = load_array_value(&arr).await.expect("load_array_value");
+    let value = arr.load_value().await.expect("load_value");
     assert!(!value.is_empty());
 }
 
@@ -334,7 +336,8 @@ async fn group_chunk_access() {
     for var in &expected_vars {
         let arr = &group.arrays[*var];
         let first_key: Vec<usize> = vec![0; arr.metadata.shape.len()];
-        let chunk = (arr.get_chunk)(first_key)
+        let chunk = arr
+            .get_chunk(&first_key)
             .await
             .unwrap_or_else(|e| panic!("chunk {var}: {e}"));
         assert!(!chunk.is_empty(), "chunk for {var} should be non-empty");
@@ -392,7 +395,8 @@ async fn group_wind_consolidated_chunk_access() {
         );
         let arr = &group.arrays[*var];
         let first_key: Vec<usize> = vec![0; arr.metadata.shape.len()];
-        let chunk = (arr.get_chunk)(first_key)
+        let chunk = arr
+            .get_chunk(&first_key)
             .await
             .unwrap_or_else(|e| panic!("chunk {var}: {e}"));
         assert!(!chunk.is_empty(), "chunk for {var} should be non-empty");

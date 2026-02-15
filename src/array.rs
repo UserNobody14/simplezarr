@@ -11,6 +11,16 @@ use crate::types::{
 };
 
 // ---------------------------------------------------------------------------
+// Internal chunk getter type
+// ---------------------------------------------------------------------------
+
+pub(crate) type ChunkGetterFn = Arc<
+    dyn Fn(Vec<usize>) -> Pin<Box<dyn Future<Output = ZarrResult<ZarrVectorValue>> + Send>>
+        + Send
+        + Sync,
+>;
+
+// ---------------------------------------------------------------------------
 // CompressionInfo
 // ---------------------------------------------------------------------------
 
@@ -43,22 +53,21 @@ pub struct UnifiedMetadata {
 }
 
 // ---------------------------------------------------------------------------
-// Chunk getter type alias
-// ---------------------------------------------------------------------------
-
-pub type ChunkGetter = Arc<
-    dyn Fn(Vec<usize>) -> Pin<Box<dyn Future<Output = ZarrResult<ZarrVectorValue>> + Send>>
-        + Send
-        + Sync,
->;
-
-// ---------------------------------------------------------------------------
 // UnifiedZarrArray
 // ---------------------------------------------------------------------------
 
 pub struct UnifiedZarrArray {
     pub metadata: UnifiedMetadata,
-    pub get_chunk: ChunkGetter,
+    pub(crate) chunk_getter: ChunkGetterFn,
+}
+
+impl Clone for UnifiedZarrArray {
+    fn clone(&self) -> Self {
+        Self {
+            metadata: self.metadata.clone(),
+            chunk_getter: self.chunk_getter.clone(),
+        }
+    }
 }
 
 impl std::fmt::Debug for UnifiedZarrArray {
@@ -66,6 +75,87 @@ impl std::fmt::Debug for UnifiedZarrArray {
         f.debug_struct("UnifiedZarrArray")
             .field("metadata", &self.metadata)
             .finish()
+    }
+}
+
+impl UnifiedZarrArray {
+    /// Fetch a single chunk by its multi-dimensional indices.
+    pub async fn get_chunk(&self, key: &[usize]) -> ZarrResult<ZarrVectorValue> {
+        (self.chunk_getter)(key.to_vec()).await
+    }
+
+    /// Load all chunks concurrently and merge into a flat `Vec<f64>`.
+    pub async fn load(&self) -> ZarrResult<Vec<f64>> {
+        let keys = self.metadata.keys.clone();
+        let getter = self.chunk_getter.clone();
+
+        let handles: Vec<_> = keys
+            .into_iter()
+            .map(|key| {
+                let getter = getter.clone();
+                tokio::spawn(async move {
+                    let indices = parse_key_string(&key);
+                    let chunk = getter(indices).await?;
+                    Ok::<_, ZarrError>((key, chunk))
+                })
+            })
+            .collect();
+
+        let mut chunk_map = HashMap::new();
+        let mut errors = Vec::new();
+
+        for handle in handles {
+            match handle.await {
+                Ok(Ok((key, chunk))) => {
+                    chunk_map.insert(key, chunk);
+                }
+                Ok(Err(e)) => errors.push(e),
+                Err(e) => errors.push(ZarrError::Other(format!("Task join error: {e}"))),
+            }
+        }
+
+        if let Some(err) = errors.into_iter().next() {
+            return Err(err);
+        }
+
+        merge_chunks(&chunk_map, &self.metadata)
+    }
+
+    /// Load all chunks concurrently and merge preserving element types.
+    pub async fn load_value(&self) -> ZarrResult<ZarrVectorValue> {
+        let keys = self.metadata.keys.clone();
+        let getter = self.chunk_getter.clone();
+
+        let handles: Vec<_> = keys
+            .into_iter()
+            .map(|key| {
+                let getter = getter.clone();
+                tokio::spawn(async move {
+                    let indices = parse_key_string(&key);
+                    let chunk = getter(indices).await?;
+                    Ok::<_, ZarrError>((key, chunk))
+                })
+            })
+            .collect();
+
+        let mut chunk_map = HashMap::new();
+        let mut errors = Vec::new();
+
+        for handle in handles {
+            match handle.await {
+                Ok(Ok((key, chunk))) => {
+                    chunk_map.insert(key, chunk);
+                }
+                Ok(Err(e)) => errors.push(e),
+                Err(e) => errors.push(ZarrError::Other(format!("Task join error: {e}"))),
+            }
+        }
+
+        if let Some(err) = errors.into_iter().next() {
+            return Err(err);
+        }
+
+        merge_chunks_value(&chunk_map, &self.metadata)
     }
 }
 
@@ -248,83 +338,3 @@ pub fn merge_chunks_value(
     Ok(ZarrVectorValue::VWithNulls(metadata.data_type, result))
 }
 
-// ---------------------------------------------------------------------------
-// Load entire array (concurrent chunk fetching)
-// ---------------------------------------------------------------------------
-
-/// Load all chunks concurrently and merge into a flat `Vec<f64>`.
-pub async fn load_array(array: &UnifiedZarrArray) -> ZarrResult<Vec<f64>> {
-    let md = &array.metadata;
-    let keys = md.keys.clone();
-    let getter = array.get_chunk.clone();
-
-    // Spawn one task per chunk key
-    let handles: Vec<_> = keys
-        .into_iter()
-        .map(|key| {
-            let getter = getter.clone();
-            tokio::spawn(async move {
-                let indices = parse_key_string(&key);
-                let chunk = getter(indices).await?;
-                Ok::<_, ZarrError>((key, chunk))
-            })
-        })
-        .collect();
-
-    let mut chunk_map = HashMap::new();
-    let mut errors = Vec::new();
-
-    for handle in handles {
-        match handle.await {
-            Ok(Ok((key, chunk))) => {
-                chunk_map.insert(key, chunk);
-            }
-            Ok(Err(e)) => errors.push(e),
-            Err(e) => errors.push(ZarrError::Other(format!("Task join error: {e}"))),
-        }
-    }
-
-    if let Some(err) = errors.into_iter().next() {
-        return Err(err);
-    }
-
-    merge_chunks(&chunk_map, md)
-}
-
-/// Load all chunks concurrently and merge preserving element types.
-pub async fn load_array_value(array: &UnifiedZarrArray) -> ZarrResult<ZarrVectorValue> {
-    let md = &array.metadata;
-    let keys = md.keys.clone();
-    let getter = array.get_chunk.clone();
-
-    let handles: Vec<_> = keys
-        .into_iter()
-        .map(|key| {
-            let getter = getter.clone();
-            tokio::spawn(async move {
-                let indices = parse_key_string(&key);
-                let chunk = getter(indices).await?;
-                Ok::<_, ZarrError>((key, chunk))
-            })
-        })
-        .collect();
-
-    let mut chunk_map = HashMap::new();
-    let mut errors = Vec::new();
-
-    for handle in handles {
-        match handle.await {
-            Ok(Ok((key, chunk))) => {
-                chunk_map.insert(key, chunk);
-            }
-            Ok(Err(e)) => errors.push(e),
-            Err(e) => errors.push(ZarrError::Other(format!("Task join error: {e}"))),
-        }
-    }
-
-    if let Some(err) = errors.into_iter().next() {
-        return Err(err);
-    }
-
-    merge_chunks_value(&chunk_map, md)
-}

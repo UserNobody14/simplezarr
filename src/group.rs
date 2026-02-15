@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::array::{load_array, UnifiedZarrArray};
+use crate::array::UnifiedZarrArray;
 use crate::error::{ZarrError, ZarrResult};
 
 // ---------------------------------------------------------------------------
@@ -68,17 +68,9 @@ impl UnifiedZarrGroup {
             .iter()
             .map(|(name, array)| {
                 let name = name.clone();
-                // We need a &UnifiedZarrArray, but we're iterating the map.
-                // Since load_array takes &UnifiedZarrArray and we can't move
-                // out of the map, we'll collect the futures inline.
-                let getter = array.get_chunk.clone();
-                let md = array.metadata.clone();
+                let array = array.clone();
                 tokio::spawn(async move {
-                    let array_ref = UnifiedZarrArray {
-                        metadata: md,
-                        get_chunk: getter,
-                    };
-                    let data = load_array(&array_ref).await?;
+                    let data = array.load().await?;
                     Ok::<_, ZarrError>((name, data))
                 })
             })
