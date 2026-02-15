@@ -1,7 +1,5 @@
-use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 use half::f16;
 use num_complex::Complex;
-use std::io::Cursor;
 
 use crate::error::{ZarrError, ZarrResult};
 
@@ -334,6 +332,10 @@ impl ZarrVectorValue {
 // ---------------------------------------------------------------------------
 
 /// Interpret raw bytes as a typed vector according to `endian` and `dtype`.
+///
+/// Uses `chunks_exact` + `from_{le,be}_bytes` instead of `Cursor` + `ReadBytesExt`
+/// so the endian branch is hoisted outside the loop, per-element error handling
+/// is eliminated, and LLVM can lower the native-endian path to a single `memcpy`.
 pub fn bytes_to_zarr_vector(
     endian: Endian,
     dtype: DataType,
@@ -348,150 +350,149 @@ pub fn bytes_to_zarr_vector(
         )),
         DataType::UInt8 => Ok(ZarrVectorValue::VUInt8(data.to_vec())),
 
-        DataType::Int16 => read_vec_typed(
+        DataType::Int16 => read_vec_fast(
             endian,
             data,
-            |c| c.read_i16::<LittleEndian>(),
-            |c| c.read_i16::<BigEndian>(),
+            i16::from_le_bytes,
+            i16::from_be_bytes,
             ZarrVectorValue::VInt16,
         ),
-        DataType::Int32 => read_vec_typed(
+        DataType::Int32 => read_vec_fast(
             endian,
             data,
-            |c| c.read_i32::<LittleEndian>(),
-            |c| c.read_i32::<BigEndian>(),
+            i32::from_le_bytes,
+            i32::from_be_bytes,
             ZarrVectorValue::VInt32,
         ),
-        DataType::Int64 => read_vec_typed(
+        DataType::Int64 => read_vec_fast(
             endian,
             data,
-            |c| c.read_i64::<LittleEndian>(),
-            |c| c.read_i64::<BigEndian>(),
+            i64::from_le_bytes,
+            i64::from_be_bytes,
             ZarrVectorValue::VInt64,
         ),
-        DataType::UInt16 => read_vec_typed(
+        DataType::UInt16 => read_vec_fast(
             endian,
             data,
-            |c| c.read_u16::<LittleEndian>(),
-            |c| c.read_u16::<BigEndian>(),
+            u16::from_le_bytes,
+            u16::from_be_bytes,
             ZarrVectorValue::VUInt16,
         ),
-        DataType::UInt32 => read_vec_typed(
+        DataType::UInt32 => read_vec_fast(
             endian,
             data,
-            |c| c.read_u32::<LittleEndian>(),
-            |c| c.read_u32::<BigEndian>(),
+            u32::from_le_bytes,
+            u32::from_be_bytes,
             ZarrVectorValue::VUInt32,
         ),
-        DataType::UInt64 => read_vec_typed(
+        DataType::UInt64 => read_vec_fast(
             endian,
             data,
-            |c| c.read_u64::<LittleEndian>(),
-            |c| c.read_u64::<BigEndian>(),
+            u64::from_le_bytes,
+            u64::from_be_bytes,
             ZarrVectorValue::VUInt64,
         ),
 
         DataType::Float16 => {
-            let elem_size = 2;
-            let count = data.len() / elem_size;
-            let mut out = Vec::with_capacity(count);
-            let mut cursor = Cursor::new(data);
-            for _ in 0..count {
-                let bits = match endian {
-                    Endian::Little | Endian::NotApplicable => cursor.read_u16::<LittleEndian>(),
-                    Endian::Big => cursor.read_u16::<BigEndian>(),
-                }
-                .map_err(|e| ZarrError::Decode(format!("Failed to read f16: {e}")))?;
-                out.push(f16::from_bits(bits));
-            }
-            Ok(ZarrVectorValue::VFloat16(out))
+            // Read as u16 first, then convert bit-pattern to f16
+            let bits = read_vec_fast_raw(endian, data, u16::from_le_bytes, u16::from_be_bytes)?;
+            Ok(ZarrVectorValue::VFloat16(
+                bits.into_iter().map(f16::from_bits).collect(),
+            ))
         }
-        DataType::Float32 => read_vec_typed(
+        DataType::Float32 => read_vec_fast(
             endian,
             data,
-            |c| c.read_f32::<LittleEndian>(),
-            |c| c.read_f32::<BigEndian>(),
+            f32::from_le_bytes,
+            f32::from_be_bytes,
             ZarrVectorValue::VFloat32,
         ),
-        DataType::Float64 => read_vec_typed(
+        DataType::Float64 => read_vec_fast(
             endian,
             data,
-            |c| c.read_f64::<LittleEndian>(),
-            |c| c.read_f64::<BigEndian>(),
+            f64::from_le_bytes,
+            f64::from_be_bytes,
             ZarrVectorValue::VFloat64,
         ),
 
         DataType::Complex64 => {
-            let elem_size = 8;
-            let count = data.len() / elem_size;
-            let mut out = Vec::with_capacity(count);
-            let mut cursor = Cursor::new(data);
-            for _ in 0..count {
-                let re = match endian {
-                    Endian::Little | Endian::NotApplicable => cursor.read_f32::<LittleEndian>(),
-                    Endian::Big => cursor.read_f32::<BigEndian>(),
-                }
-                .map_err(|e| ZarrError::Decode(format!("Failed to read complex64 re: {e}")))?;
-                let im = match endian {
-                    Endian::Little | Endian::NotApplicable => cursor.read_f32::<LittleEndian>(),
-                    Endian::Big => cursor.read_f32::<BigEndian>(),
-                }
-                .map_err(|e| ZarrError::Decode(format!("Failed to read complex64 im: {e}")))?;
-                out.push(Complex::new(re, im));
+            if data.len() % 8 != 0 {
+                return Err(ZarrError::Decode(format!(
+                    "Data length {} is not a multiple of 8 for Complex64",
+                    data.len()
+                )));
             }
+            // Read all f32 components in bulk, then pair into complex numbers
+            let floats = read_vec_fast_raw(endian, data, f32::from_le_bytes, f32::from_be_bytes)?;
+            let out: Vec<Complex<f32>> = floats
+                .chunks_exact(2)
+                .map(|pair| Complex::new(pair[0], pair[1]))
+                .collect();
             Ok(ZarrVectorValue::VComplex64(out))
         }
         DataType::Complex128 => {
-            let elem_size = 16;
-            let count = data.len() / elem_size;
-            let mut out = Vec::with_capacity(count);
-            let mut cursor = Cursor::new(data);
-            for _ in 0..count {
-                let re = match endian {
-                    Endian::Little | Endian::NotApplicable => cursor.read_f64::<LittleEndian>(),
-                    Endian::Big => cursor.read_f64::<BigEndian>(),
-                }
-                .map_err(|e| ZarrError::Decode(format!("Failed to read complex128 re: {e}")))?;
-                let im = match endian {
-                    Endian::Little | Endian::NotApplicable => cursor.read_f64::<LittleEndian>(),
-                    Endian::Big => cursor.read_f64::<BigEndian>(),
-                }
-                .map_err(|e| ZarrError::Decode(format!("Failed to read complex128 im: {e}")))?;
-                out.push(Complex::new(re, im));
+            if data.len() % 16 != 0 {
+                return Err(ZarrError::Decode(format!(
+                    "Data length {} is not a multiple of 16 for Complex128",
+                    data.len()
+                )));
             }
+            // Read all f64 components in bulk, then pair into complex numbers
+            let floats = read_vec_fast_raw(endian, data, f64::from_le_bytes, f64::from_be_bytes)?;
+            let out: Vec<Complex<f64>> = floats
+                .chunks_exact(2)
+                .map(|pair| Complex::new(pair[0], pair[1]))
+                .collect();
             Ok(ZarrVectorValue::VComplex128(out))
         }
+
         DataType::String | DataType::Bytes => Err(ZarrError::Decode(
             "Cannot interpret raw bytes as String/Bytes vector without length info".into(),
         )),
     }
 }
 
-/// Helper: read a vector of a fixed-size numeric type.
-fn read_vec_typed<T: Clone, F1, F2>(
+/// Helper: read a vector of a fixed-size numeric type, wrap into `ZarrVectorValue`.
+#[inline]
+fn read_vec_fast<T: Copy, const N: usize>(
     endian: Endian,
     data: &[u8],
-    read_le: F1,
-    read_be: F2,
+    from_le: fn([u8; N]) -> T,
+    from_be: fn([u8; N]) -> T,
     wrap: fn(Vec<T>) -> ZarrVectorValue,
-) -> ZarrResult<ZarrVectorValue>
-where
-    F1: Fn(&mut Cursor<&[u8]>) -> std::io::Result<T>,
-    F2: Fn(&mut Cursor<&[u8]>) -> std::io::Result<T>,
-{
-    let elem_size = std::mem::size_of::<T>();
-    let count = data.len() / elem_size;
-    let mut out = Vec::with_capacity(count);
-    let mut cursor = Cursor::new(data);
-    for _ in 0..count {
-        let val = match endian {
-            Endian::Little | Endian::NotApplicable => (read_le)(&mut cursor),
-            Endian::Big => (read_be)(&mut cursor),
-        }
-        .map_err(|e| ZarrError::Decode(format!("Failed to read value: {e}")))?;
-        out.push(val);
+) -> ZarrResult<ZarrVectorValue> {
+    Ok(wrap(read_vec_fast_raw(endian, data, from_le, from_be)?))
+}
+
+/// Inner helper: validate length once, select endian conversion once, then
+/// blast through the data with `chunks_exact` — no `Cursor`, no per-element
+/// `Result`, and LLVM collapses the native-endian path to `memcpy`.
+#[inline]
+fn read_vec_fast_raw<T: Copy, const N: usize>(
+    endian: Endian,
+    data: &[u8],
+    from_le: fn([u8; N]) -> T,
+    from_be: fn([u8; N]) -> T,
+) -> ZarrResult<Vec<T>> {
+    if data.len() % N != 0 {
+        return Err(ZarrError::Decode(format!(
+            "Data length {} is not a multiple of element size {N}",
+            data.len()
+        )));
     }
-    Ok(wrap(out))
+    let convert = match endian {
+        Endian::Little | Endian::NotApplicable => from_le,
+        Endian::Big => from_be,
+    };
+    // chunks_exact(N) guarantees each chunk is exactly N bytes,
+    // so the try_into().unwrap() is infallible and optimised away.
+    Ok(data
+        .chunks_exact(N)
+        .map(|chunk| {
+            let arr: [u8; N] = chunk.try_into().unwrap();
+            convert(arr)
+        })
+        .collect())
 }
 
 /// Create a filled chunk vector by replicating a scalar value.
