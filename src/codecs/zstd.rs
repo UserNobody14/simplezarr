@@ -1,5 +1,6 @@
 use crate::error::{ZarrError, ZarrResult};
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZstdCodec {
@@ -19,8 +20,15 @@ impl Default for ZstdCodec {
 
 impl ZstdCodec {
     pub fn decode(&self, data: &[u8]) -> ZarrResult<Vec<u8>> {
-        zstd::bulk::decompress(data, 0) // 0 = auto-detect size from frame header
-            .map_err(|e| ZarrError::Decode(format!("Zstd decompress failed: {e}")))
+        // Use streaming decoder -- handles frames that lack a content-size field
+        // (common with numcodecs' zstd output).
+        let mut decoder = zstd::Decoder::new(data)
+            .map_err(|e| ZarrError::Decode(format!("Zstd decoder init failed: {e}")))?;
+        let mut out = Vec::new();
+        decoder
+            .read_to_end(&mut out)
+            .map_err(|e| ZarrError::Decode(format!("Zstd decompress failed: {e}")))?;
+        Ok(out)
     }
 
     pub fn encode(&self, data: &[u8]) -> ZarrResult<Vec<u8>> {
