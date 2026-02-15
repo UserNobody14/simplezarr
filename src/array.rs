@@ -1,12 +1,11 @@
-use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::codecs::{AnyCodec, apply_codec_pipeline};
-use crate::error::{ZarrError, ZarrResult};
+use crate::error::ZarrResult;
 use crate::types::{
-    ArrayOrder, DataType, Endian, FillValue, ZarrValue, ZarrVectorValue, bytes_to_zarr_vector,
+    ArrayOrder, DataType, Endian, FillValue, ZarrVectorValue, bytes_to_zarr_vector,
     fill_chunk,
 };
 
