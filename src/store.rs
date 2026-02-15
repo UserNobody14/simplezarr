@@ -1,6 +1,7 @@
 use crate::error::{ZarrError, ZarrResult};
 use async_trait::async_trait;
 use bytes::Bytes;
+use object_store::ObjectStoreExt;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -68,9 +69,9 @@ impl StorageBackend for LocalBackend {
     async fn list(&self, prefix: &str) -> ZarrResult<Vec<String>> {
         let dir = self.resolve(prefix);
         let mut entries = Vec::new();
-        let mut reader = tokio::fs::read_dir(&dir).await.map_err(|e| {
-            ZarrError::Storage(format!("Failed to list {}: {e}", dir.display()))
-        })?;
+        let mut reader = tokio::fs::read_dir(&dir)
+            .await
+            .map_err(|e| ZarrError::Storage(format!("Failed to list {}: {e}", dir.display())))?;
         while let Some(entry) = reader.next_entry().await.map_err(|e| {
             ZarrError::Storage(format!("Failed to read entry in {}: {e}", dir.display()))
         })? {
@@ -141,9 +142,11 @@ impl StorageBackend for ObjectStoreBackend {
         let location = self.full_path(prefix);
         let mut entries = Vec::new();
         let mut stream = self.store.list(Some(&location));
-        while let Some(meta) = stream.try_next().await.map_err(|e| {
-            ZarrError::Storage(format!("Object store list error for {prefix}: {e}"))
-        })? {
+        while let Some(meta) = stream
+            .try_next()
+            .await
+            .map_err(|e| ZarrError::Storage(format!("Object store list error for {prefix}: {e}")))?
+        {
             entries.push(meta.location.to_string());
         }
         Ok(entries)
