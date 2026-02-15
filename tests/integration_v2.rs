@@ -225,53 +225,68 @@ async fn validate_constant_wind_range() {
 }
 
 // ---------------------------------------------------------------------------
-// Full array load (merge all chunks)
+// Load single chunk from array instead of the full array
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn load_full_constant_temperature() {
+async fn load_chunk_constant_temperature() {
     require_test_data();
     let arr = open_var("hrrr_grid_dataset_constant.zarr", "2m_temperature")
         .await
         .expect("open constant/2m_temperature");
 
-    let data = arr.load().await.expect("load");
+    let first_key: Vec<usize> = vec![0; arr.metadata.shape.len()];
+    let chunk = arr
+        .get_chunk(&first_key)
+        .await
+        .expect("get_chunk constant/2m_temperature");
+    let data = chunk
+        .to_f64_vec()
+        .expect("to_f64_vec constant/2m_temperature");
 
-    // Total elements: 3 * 10 * 400 * 400 = 4_800_000
-    assert_eq!(data.len(), 3 * 10 * 400 * 400);
-
+    assert!(!data.is_empty(), "chunk data should not be empty");
     let min = data.iter().copied().fold(f64::INFINITY, f64::min);
     let max = data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    assert!(min >= 270.0, "full temp min {min}");
-    assert!(max <= 320.0, "full temp max {max}");
+    assert!(min >= 270.0, "chunk temp min {min}");
+    assert!(max <= 320.0, "chunk temp max {max}");
 }
 
 #[tokio::test]
-async fn load_full_constant_precipitation() {
+async fn load_chunk_constant_precipitation() {
     require_test_data();
     let arr = open_var("hrrr_grid_dataset_constant.zarr", "total_precipitation")
         .await
         .expect("open constant/total_precipitation");
 
-    let data = arr.load().await.expect("load");
+    let first_key: Vec<usize> = vec![0; arr.metadata.shape.len()];
+    let chunk = arr
+        .get_chunk(&first_key)
+        .await
+        .expect("get_chunk constant/total_precipitation");
+    let data = chunk
+        .to_f64_vec()
+        .expect("to_f64_vec constant/total_precipitation");
 
-    assert_eq!(data.len(), 3 * 10 * 400 * 400);
-
+    assert!(!data.is_empty(), "chunk data should not be empty");
     let min = data.iter().copied().fold(f64::INFINITY, f64::min);
     let max = data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    assert!(min >= 0.0, "full precip min {min}");
-    assert!(max <= 0.02, "full precip max {max}");
+    assert!(min >= 0.0, "chunk precip min {min}");
+    assert!(max <= 0.02, "chunk precip max {max}");
 }
 
 #[tokio::test]
-async fn load_value_preserves_type() {
+async fn get_chunk_value_preserves_type() {
     require_test_data();
     let arr = open_var("hrrr_grid_dataset_constant.zarr", "2m_temperature")
         .await
         .expect("open");
 
-    let value = arr.load_value().await.expect("load_value");
-    assert!(!value.is_empty());
+    let first_key: Vec<usize> = vec![0; arr.metadata.shape.len()];
+    let chunk = arr
+        .get_chunk(&first_key)
+        .await
+        .expect("get_chunk value/2m_temperature");
+    assert!(!chunk.is_empty(), "chunk value should not be empty");
 }
 
 // ---------------------------------------------------------------------------
@@ -341,25 +356,6 @@ async fn group_chunk_access() {
             .await
             .unwrap_or_else(|e| panic!("chunk {var}: {e}"));
         assert!(!chunk.is_empty(), "chunk for {var} should be non-empty");
-    }
-}
-
-#[tokio::test]
-async fn group_load_all() {
-    require_test_data();
-    let store = v2_store();
-    let expected_vars: Vec<&str> = vec!["2m_temperature", "total_precipitation"];
-
-    let group = v2::open_group(store, "hrrr_grid_dataset_constant.zarr", &expected_vars)
-        .await
-        .expect("open_group");
-
-    let loaded = group.load_all().await.expect("load_all");
-
-    for var in &expected_vars {
-        assert!(loaded.contains_key(*var), "loaded should contain {var}");
-        let data = &loaded[*var];
-        assert!(!data.is_empty(), "{var} data should be non-empty");
     }
 }
 

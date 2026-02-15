@@ -3,11 +3,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::codecs::{apply_codec_pipeline, AnyCodec};
+use crate::codecs::{AnyCodec, apply_codec_pipeline};
 use crate::error::{ZarrError, ZarrResult};
 use crate::types::{
-    bytes_to_zarr_vector, fill_chunk, ArrayOrder, DataType, Endian, FillValue, ZarrValue,
-    ZarrVectorValue,
+    ArrayOrder, DataType, Endian, FillValue, ZarrValue, ZarrVectorValue, bytes_to_zarr_vector,
+    fill_chunk,
 };
 
 // ---------------------------------------------------------------------------
@@ -83,80 +83,6 @@ impl UnifiedZarrArray {
     pub async fn get_chunk(&self, key: &[usize]) -> ZarrResult<ZarrVectorValue> {
         (self.chunk_getter)(key.to_vec()).await
     }
-
-    /// Load all chunks concurrently and merge into a flat `Vec<f64>`.
-    pub async fn load(&self) -> ZarrResult<Vec<f64>> {
-        let keys = self.metadata.keys.clone();
-        let getter = self.chunk_getter.clone();
-
-        let handles: Vec<_> = keys
-            .into_iter()
-            .map(|key| {
-                let getter = getter.clone();
-                tokio::spawn(async move {
-                    let indices = parse_key_string(&key);
-                    let chunk = getter(indices).await?;
-                    Ok::<_, ZarrError>((key, chunk))
-                })
-            })
-            .collect();
-
-        let mut chunk_map = HashMap::new();
-        let mut errors = Vec::new();
-
-        for handle in handles {
-            match handle.await {
-                Ok(Ok((key, chunk))) => {
-                    chunk_map.insert(key, chunk);
-                }
-                Ok(Err(e)) => errors.push(e),
-                Err(e) => errors.push(ZarrError::Other(format!("Task join error: {e}"))),
-            }
-        }
-
-        if let Some(err) = errors.into_iter().next() {
-            return Err(err);
-        }
-
-        merge_chunks(&chunk_map, &self.metadata)
-    }
-
-    /// Load all chunks concurrently and merge preserving element types.
-    pub async fn load_value(&self) -> ZarrResult<ZarrVectorValue> {
-        let keys = self.metadata.keys.clone();
-        let getter = self.chunk_getter.clone();
-
-        let handles: Vec<_> = keys
-            .into_iter()
-            .map(|key| {
-                let getter = getter.clone();
-                tokio::spawn(async move {
-                    let indices = parse_key_string(&key);
-                    let chunk = getter(indices).await?;
-                    Ok::<_, ZarrError>((key, chunk))
-                })
-            })
-            .collect();
-
-        let mut chunk_map = HashMap::new();
-        let mut errors = Vec::new();
-
-        for handle in handles {
-            match handle.await {
-                Ok(Ok((key, chunk))) => {
-                    chunk_map.insert(key, chunk);
-                }
-                Ok(Err(e)) => errors.push(e),
-                Err(e) => errors.push(ZarrError::Other(format!("Task join error: {e}"))),
-            }
-        }
-
-        if let Some(err) = errors.into_iter().next() {
-            return Err(err);
-        }
-
-        merge_chunks_value(&chunk_map, &self.metadata)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -168,21 +94,28 @@ pub fn strides(shape: &[usize], order: ArrayOrder) -> Vec<usize> {
     match order {
         ArrayOrder::C => {
             // Row-major: last dimension varies fastest.
-            let mut s: Vec<usize> = shape.iter().rev().scan(1usize, |state, &dim| {
-                let stride = *state;
-                *state *= dim;
-                Some(stride)
-            }).collect();
+            let mut s: Vec<usize> = shape
+                .iter()
+                .rev()
+                .scan(1usize, |state, &dim| {
+                    let stride = *state;
+                    *state *= dim;
+                    Some(stride)
+                })
+                .collect();
             s.reverse();
             s
         }
         ArrayOrder::F => {
             // Column-major: first dimension varies fastest.
-            shape.iter().scan(1usize, |state, &dim| {
-                let stride = *state;
-                *state *= dim;
-                Some(stride)
-            }).collect()
+            shape
+                .iter()
+                .scan(1usize, |state, &dim| {
+                    let stride = *state;
+                    *state *= dim;
+                    Some(stride)
+                })
+                .collect()
         }
     }
 }
@@ -286,7 +219,11 @@ pub fn merge_chunks(
                 .all(|(g, s)| *g < *s);
 
             if in_bounds {
-                let flat: usize = global.iter().zip(arr_strides.iter()).map(|(g, s)| g * s).sum();
+                let flat: usize = global
+                    .iter()
+                    .zip(arr_strides.iter())
+                    .map(|(g, s)| g * s)
+                    .sum();
                 if flat < total_size && local_idx < chunk_data.len() {
                     result[flat] = chunk_data[local_idx];
                 }
@@ -327,7 +264,11 @@ pub fn merge_chunks_value(
                 .all(|(g, s)| *g < *s);
 
             if in_bounds {
-                let flat: usize = global.iter().zip(arr_strides.iter()).map(|(g, s)| g * s).sum();
+                let flat: usize = global
+                    .iter()
+                    .zip(arr_strides.iter())
+                    .map(|(g, s)| g * s)
+                    .sum();
                 if flat < total_size && local_idx < chunk_vals.len() {
                     result[flat] = chunk_vals[local_idx].clone();
                 }
@@ -337,4 +278,3 @@ pub fn merge_chunks_value(
 
     Ok(ZarrVectorValue::VWithNulls(metadata.data_type, result))
 }
-

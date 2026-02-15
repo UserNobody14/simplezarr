@@ -17,7 +17,6 @@ use crate::error::{ZarrError, ZarrResult};
 use crate::group::{UnifiedGroupMetadata, UnifiedZarrGroup};
 use crate::metadata::v2::{ZarrCompressor, ZarrConsolidatedMetadata, ZarrV2Metadata};
 use crate::store::StorageBackend;
-use crate::types::ZarrVectorValue;
 
 // ---------------------------------------------------------------------------
 // Compressor -> codec list conversion
@@ -234,21 +233,6 @@ pub async fn open<S: StorageBackend + 'static>(
     })
 }
 
-/// Open and load a V2 array, returning a flat `Vec<f64>`.
-pub async fn load<S: StorageBackend + 'static>(store: Arc<S>, path: &str) -> ZarrResult<Vec<f64>> {
-    let array = open(store, path).await?;
-    array.load().await
-}
-
-/// Open and load a V2 array, preserving element types.
-pub async fn load_value<S: StorageBackend + 'static>(
-    store: Arc<S>,
-    path: &str,
-) -> ZarrResult<ZarrVectorValue> {
-    let array = open(store, path).await?;
-    array.load_value().await
-}
-
 /// Open a group of V2 arrays. Tries `.zmetadata` (consolidated) first,
 /// falls back to opening each array individually.
 pub async fn open_group<S: StorageBackend + 'static>(
@@ -357,14 +341,4 @@ pub async fn open_group<S: StorageBackend + 'static>(
             })
         }
     }
-}
-
-/// Open and load an entire V2 group, returning name -> Vec<f64>.
-pub async fn load_group<S: StorageBackend + 'static>(
-    store: Arc<S>,
-    path: &str,
-    array_names: &[&str],
-) -> ZarrResult<HashMap<String, Vec<f64>>> {
-    let group = open_group(store, path, array_names).await?;
-    group.load_all().await
 }

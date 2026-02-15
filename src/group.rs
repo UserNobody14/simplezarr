@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use crate::array::UnifiedZarrArray;
-use crate::error::{ZarrError, ZarrResult};
 
 // ---------------------------------------------------------------------------
 // UnifiedGroupMetadata
@@ -59,40 +58,5 @@ impl UnifiedZarrGroup {
 
     pub fn get_array(&self, name: &str) -> Option<&UnifiedZarrArray> {
         self.arrays.get(name)
-    }
-
-    /// Load every array in the group concurrently, returning name -> Vec<f64>.
-    pub async fn load_all(&self) -> ZarrResult<HashMap<String, Vec<f64>>> {
-        let handles: Vec<_> = self
-            .arrays
-            .iter()
-            .map(|(name, array)| {
-                let name = name.clone();
-                let array = array.clone();
-                tokio::spawn(async move {
-                    let data = array.load().await?;
-                    Ok::<_, ZarrError>((name, data))
-                })
-            })
-            .collect();
-
-        let mut results = HashMap::new();
-        let mut errors = Vec::new();
-
-        for handle in handles {
-            match handle.await {
-                Ok(Ok((name, data))) => {
-                    results.insert(name, data);
-                }
-                Ok(Err(e)) => errors.push(e),
-                Err(e) => errors.push(ZarrError::Other(format!("Task join error: {e}"))),
-            }
-        }
-
-        if let Some(err) = errors.into_iter().next() {
-            return Err(err);
-        }
-
-        Ok(results)
     }
 }
