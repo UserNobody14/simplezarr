@@ -3,10 +3,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::codecs::{AnyCodec, apply_codec_pipeline};
-use crate::error::ZarrResult;
+use crate::error::{ZarrError, ZarrResult};
+use crate::store::StorageBackend;
 use crate::types::{
-    ArrayOrder, DataType, Endian, FillValue, ZarrVectorValue, bytes_to_zarr_vector,
-    fill_chunk,
+    ArrayOrder, DataType, Endian, FillValue, ZarrVectorValue, bytes_to_zarr_vector, fill_chunk,
 };
 
 // ---------------------------------------------------------------------------
@@ -57,14 +57,18 @@ pub struct UnifiedMetadata {
 
 pub struct UnifiedZarrArray {
     pub metadata: UnifiedMetadata,
-    pub(crate) chunk_getter: ChunkGetterFn,
+    pub(crate) store: Arc<dyn StorageBackend>,
+    pub(crate) path: String,
+    pub(crate) codecs: Vec<AnyCodec>,
 }
 
 impl Clone for UnifiedZarrArray {
     fn clone(&self) -> Self {
         Self {
             metadata: self.metadata.clone(),
-            chunk_getter: self.chunk_getter.clone(),
+            store: self.store.clone(),
+            path: self.path.clone(),
+            codecs: self.codecs.clone(),
         }
     }
 }
@@ -80,7 +84,36 @@ impl std::fmt::Debug for UnifiedZarrArray {
 impl UnifiedZarrArray {
     /// Fetch a single chunk by its multi-dimensional indices.
     pub async fn get_chunk(&self, key: &[usize]) -> ZarrResult<ZarrVectorValue> {
-        (self.chunk_getter)(key.to_vec()).await
+        if key.len() != self.metadata.shape.len() {
+            return Err(ZarrError::Other(
+                "Key dimensionality must match array shape".into(),
+            ));
+        }
+
+        let key_str: String = key
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(".");
+
+        if !self.metadata.keys.contains(&key_str) {
+            return Err(ZarrError::NotFound(format!(
+                "Storage key {key_str} not found"
+            )));
+        }
+
+        let chunk_path = self.store.join(&self.path, &key_str);
+        let bytes = self.store.get(&chunk_path).await?;
+
+        let raw: Option<&[u8]> = bytes.as_deref();
+        parse_chunk(
+            raw,
+            self.metadata.data_type,
+            &self.metadata.chunk_shape,
+            &self.metadata.fill_value,
+            &self.codecs,
+        )
+        .await
     }
 }
 

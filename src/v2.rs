@@ -225,11 +225,11 @@ pub async fn open<S: StorageBackend + 'static>(
         keys: md.keys.clone(),
     };
 
-    let getter = create_v2_chunk_getter(store.clone(), path.to_string(), md);
-
     Ok(UnifiedZarrArray {
         metadata: unified_md,
-        chunk_getter: getter,
+        store: store.clone(),
+        path: path.to_string(),
+        codecs: get_codec_equivalents(&md),
     })
 }
 
@@ -271,13 +271,14 @@ pub async fn open_group<S: StorageBackend + 'static>(
                 };
 
                 let array_path = store.join(path, name);
-                let getter = create_v2_chunk_getter(store.clone(), array_path, md.clone());
 
                 arrays.insert(
                     name.clone(),
                     UnifiedZarrArray {
                         metadata: unified_md,
-                        chunk_getter: getter,
+                        store: store.clone(),
+                        path: array_path,
+                        codecs: get_codec_equivalents(&md),
                     },
                 );
             }
