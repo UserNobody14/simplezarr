@@ -1,5 +1,6 @@
 use crate::error::{ZarrError, ZarrResult};
 use serde::{Deserialize, Serialize};
+use std::ffi::CStr;
 
 // ---------------------------------------------------------------------------
 // Blosc sub-compressor and shuffle types
@@ -112,7 +113,7 @@ impl Default for BloscCodec {
 }
 
 impl BloscCodec {
-    /// Decompress blosc-compressed data using the pure-Rust `blusc` library.
+    /// Decompress blosc-compressed data.
     /// Runs on a blocking thread since decompression can be CPU-intensive.
     pub async fn decode(&self, data: &[u8]) -> ZarrResult<Vec<u8>> {
         let data = data.to_vec();
@@ -121,45 +122,68 @@ impl BloscCodec {
             .map_err(|e| ZarrError::Decode(format!("Blosc task join error: {e}")))?
     }
 
-    /// Compress data using the pure-Rust `blusc` library.
+    /// Compress data using blosc.
     pub async fn encode(&self, data: &[u8]) -> ZarrResult<Vec<u8>> {
         let data = data.to_vec();
         let clevel = self.clevel;
         let shuffle = self.shuffle.unwrap_or(BloscShuffle::NoShuffle);
         let typesize = self.typesize.unwrap_or(1);
-        tokio::task::spawn_blocking(move || blosc_compress(&data, clevel, shuffle, typesize))
-            .await
-            .map_err(|e| ZarrError::Encode(format!("Blosc task join error: {e}")))?
+        let cname = self.cname;
+        let blocksize = self.blocksize;
+        tokio::task::spawn_blocking(move || {
+            blosc_compress(&data, clevel, shuffle, typesize, cname, blocksize)
+        })
+        .await
+        .map_err(|e| ZarrError::Encode(format!("Blosc task join error: {e}")))?
     }
 }
 
 // ---------------------------------------------------------------------------
-// Pure-Rust blosc wrappers via `blusc`
+// Blosc FFI wrappers
 // ---------------------------------------------------------------------------
 
-/// Read the uncompressed size from a blosc header.
-/// The blosc1 header layout (16 bytes):
-///   byte 0: blosc version
-///   byte 1: blosc version format
-///   byte 2: flags
-///   byte 3: typesize
-///   bytes 4..8: nbytes (uncompressed, little-endian u32)
-///   bytes 8..12: blocksize
-///   bytes 12..16: cbytes (compressed, little-endian u32)
-fn blosc_header_nbytes(data: &[u8]) -> ZarrResult<usize> {
-    if data.len() < 16 {
-        return Err(ZarrError::Decode(
-            "Blosc buffer too small for header (need >= 16 bytes)".into(),
-        ));
+/// Map a `BloscCname` to the corresponding C string expected by blosc.
+fn compressor_as_cstr(cname: BloscCname) -> &'static CStr {
+    match cname {
+        BloscCname::Lz4 => c"lz4",
+        BloscCname::Lz4hc => c"lz4hc",
+        BloscCname::Blosclz => c"blosclz",
+        BloscCname::Zstd => c"zstd",
+        BloscCname::Snappy => c"snappy",
+        BloscCname::Zlib => c"zlib",
     }
-    let nbytes = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
-    Ok(nbytes)
 }
 
+/// Validate a blosc compressed buffer and return the uncompressed size.
+/// Returns `None` if the buffer is invalid.
+fn blosc_validate(data: &[u8]) -> Option<usize> {
+    let mut nbytes: usize = 0;
+    let result =
+        unsafe { blosc_src::blosc_cbuffer_validate(data.as_ptr().cast(), data.len(), &mut nbytes) };
+    if result == 0 { Some(nbytes) } else { None }
+}
+
+/// Decompress a blosc-compressed buffer.
+///
+/// Uses `blosc_decompress_ctx` which is thread-safe and does not require
+/// `blosc_init()`.
 fn blosc_decompress(data: &[u8]) -> ZarrResult<Vec<u8>> {
-    let nbytes = blosc_header_nbytes(data)?;
+    let nbytes = blosc_validate(data)
+        .ok_or_else(|| ZarrError::Decode("Blosc encoded value is invalid".into()))?;
+
+    if nbytes == 0 {
+        return Ok(Vec::new());
+    }
+
     let mut output = vec![0u8; nbytes];
-    let result = blusc::blosc2_decompress(data, &mut output);
+    let result = unsafe {
+        blosc_src::blosc_decompress_ctx(
+            data.as_ptr().cast(),
+            output.as_mut_ptr().cast(),
+            output.len(),
+            1, // numinternalthreads
+        )
+    };
     if result < 0 {
         return Err(ZarrError::Decode(format!(
             "Blosc decompress returned error code: {result}"
@@ -168,21 +192,42 @@ fn blosc_decompress(data: &[u8]) -> ZarrResult<Vec<u8>> {
     Ok(output)
 }
 
+/// Compress data using blosc.
+///
+/// Uses `blosc_compress_ctx` which is thread-safe, does not require
+/// `blosc_init()`, and accepts the compressor name directly (no global state).
 fn blosc_compress(
     data: &[u8],
     clevel: i32,
     shuffle: BloscShuffle,
     typesize: usize,
+    cname: BloscCname,
+    blocksize: usize,
 ) -> ZarrResult<Vec<u8>> {
     let shuffle_int = match shuffle {
-        BloscShuffle::NoShuffle => blusc::BLOSC_NOSHUFFLE as i32,
-        BloscShuffle::Shuffle => blusc::BLOSC_SHUFFLE as i32,
-        BloscShuffle::BitShuffle => blusc::BLOSC_BITSHUFFLE as i32,
+        BloscShuffle::NoShuffle => blosc_src::BLOSC_NOSHUFFLE as i32,
+        BloscShuffle::Shuffle => blosc_src::BLOSC_SHUFFLE as i32,
+        BloscShuffle::BitShuffle => blosc_src::BLOSC_BITSHUFFLE as i32,
     };
 
-    let mut compressed = vec![0u8; data.len() + blusc::BLOSC2_MAX_OVERHEAD];
-    let cbytes =
-        blusc::blosc2_compress(clevel, shuffle_int, typesize, data, &mut compressed);
+    let destsize = data.len() + blosc_src::BLOSC_MAX_OVERHEAD as usize;
+    let mut compressed = vec![0u8; destsize];
+
+    let cbytes = unsafe {
+        blosc_src::blosc_compress_ctx(
+            clevel,
+            shuffle_int,
+            typesize,
+            data.len(),
+            data.as_ptr().cast(),
+            compressed.as_mut_ptr().cast(),
+            destsize,
+            compressor_as_cstr(cname).as_ptr(),
+            blocksize,
+            1, // numinternalthreads
+        )
+    };
+
     if cbytes < 0 {
         return Err(ZarrError::Encode(format!(
             "Blosc compress returned error code: {cbytes}"
