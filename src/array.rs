@@ -1,23 +1,11 @@
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::ZarrVec;
 use crate::codecs::{AnyCodec, apply_codec_pipeline};
 use crate::error::{ZarrError, ZarrResult};
 use crate::store::StorageBackend;
-use crate::types::{
-    ArrayOrder, DataType, Endian, FillValue, ZarrVectorValue, bytes_to_zarr_vector, fill_chunk,
-};
-
-// ---------------------------------------------------------------------------
-// Internal chunk getter type
-// ---------------------------------------------------------------------------
-
-pub(crate) type ChunkGetterFn = Arc<
-    dyn Fn(Vec<usize>) -> Pin<Box<dyn Future<Output = ZarrResult<ZarrVectorValue>> + Send>>
-        + Send
-        + Sync,
->;
+use crate::types::{ArrayOrder, DataType, Endian, FillValue};
+use crate::vec::{bytes_to_zarr_vector, fill_chunk};
 
 // ---------------------------------------------------------------------------
 // CompressionInfo
@@ -83,7 +71,7 @@ impl std::fmt::Debug for UnifiedZarrArray {
 
 impl UnifiedZarrArray {
     /// Fetch a single chunk by its multi-dimensional indices.
-    pub async fn get_chunk(&self, key: &[usize]) -> ZarrResult<ZarrVectorValue> {
+    pub async fn get_chunk(&self, key: &[usize]) -> ZarrResult<ZarrVec> {
         if key.len() != self.metadata.shape.len() {
             return Err(ZarrError::Other(
                 "Key dimensionality must match array shape".into(),
@@ -195,7 +183,7 @@ pub async fn parse_chunk(
     chunk_shape: &[usize],
     fill_value: &FillValue,
     codecs: &[AnyCodec],
-) -> ZarrResult<ZarrVectorValue> {
+) -> ZarrResult<ZarrVec> {
     match data {
         Some(raw) if !raw.is_empty() => {
             let decompressed = apply_codec_pipeline(codecs, raw).await?;
@@ -206,7 +194,7 @@ pub async fn parse_chunk(
                 .find_map(|c| c.bytes_endian())
                 .unwrap_or(Endian::Little);
 
-            bytes_to_zarr_vector(endian, dtype, &decompressed)
+            bytes_to_zarr_vector(endian, dtype, decompressed)
         }
         _ => {
             // Missing or empty chunk -> fill with fill value

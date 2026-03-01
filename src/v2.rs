@@ -3,9 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::array::{
-    ChunkGetterFn, CompressionInfo, UnifiedMetadata, UnifiedZarrArray, parse_chunk,
-};
+use crate::array::{CompressionInfo, UnifiedMetadata, UnifiedZarrArray, parse_chunk};
 use crate::codecs::AnyCodec;
 use crate::codecs::blosc::{BloscCname, BloscCodec, BloscShuffle};
 use crate::codecs::bytes::BytesCodec;
@@ -143,53 +141,6 @@ fn get_codec_equivalents(md: &ZarrV2Metadata) -> Vec<AnyCodec> {
     // Append a BytesCodec with the correct endianness
     codecs.push(AnyCodec::Bytes(BytesCodec::new(md.dtype.byte_order)));
     codecs
-}
-
-// ---------------------------------------------------------------------------
-// Create chunk getter
-// ---------------------------------------------------------------------------
-
-fn create_v2_chunk_getter<S: StorageBackend + 'static>(
-    store: Arc<S>,
-    base_path: String,
-    md: ZarrV2Metadata,
-) -> ChunkGetterFn {
-    let codecs = get_codec_equivalents(&md);
-    let md = Arc::new(md);
-    let codecs = Arc::new(codecs);
-
-    Arc::new(move |key: Vec<usize>| {
-        let store = store.clone();
-        let base_path = base_path.clone();
-        let md = md.clone();
-        let codecs = codecs.clone();
-
-        Box::pin(async move {
-            if key.len() != md.shape.len() {
-                return Err(ZarrError::Other(
-                    "Key dimensionality must match array shape".into(),
-                ));
-            }
-
-            let key_str: String = key
-                .iter()
-                .map(|i| i.to_string())
-                .collect::<Vec<_>>()
-                .join(".");
-
-            if !md.keys.contains(&key_str) {
-                return Err(ZarrError::NotFound(format!(
-                    "Storage key {key_str} not found"
-                )));
-            }
-
-            let chunk_path = store.join(&base_path, &key_str);
-            let bytes = store.get(&chunk_path).await?;
-
-            let raw: Option<&[u8]> = bytes.as_deref();
-            parse_chunk(raw, md.dtype.data_type, &md.chunks, &md.fill_value, &codecs).await
-        })
-    })
 }
 
 // ---------------------------------------------------------------------------
