@@ -2,8 +2,6 @@ use crate::error::{ZarrError, ZarrResult};
 use crate::types::{DataType, Endian, ZarrValue};
 use half::f16;
 use num_complex::Complex;
-use zerocopy::Ref;
-use zerocopy::byteorder::little_endian;
 
 // ---------------------------------------------------------------------------
 // ZarrVec  (typed chunk data)
@@ -122,71 +120,68 @@ impl ZarrVec {
 // Raw bytes -> typed vector
 // ---------------------------------------------------------------------------
 
-/// Transmutes `Vec<u8>` into `Vec<i16>` in-place (zero allocation).
-/// Caller must ensure `data.len() % 2 == 0` and bytes are already in native endianness.
+/// Transmutes `Vec<u8>` into `Vec<T>` in-place (zero allocation).
+/// Caller must ensure `data.len() % size_of::<T>() == 0` and bytes are in native endianness.
 #[inline]
-fn vec_u8_into_vec_i16(data: Vec<u8>) -> ZarrResult<Vec<i16>> {
-    if data.len() % 2 != 0 {
+fn vec_u8_into_vec<T: Copy>(data: Vec<u8>) -> ZarrResult<Vec<T>> {
+    let size = std::mem::size_of::<T>();
+    if data.len() % size != 0 {
         return Err(ZarrError::Decode(format!(
-            "Data length {} is not a multiple of 2",
-            data.len()
+            "Data length {} is not a multiple of {}",
+            data.len(),
+            size
         )));
     }
-    let len = data.len() / 2;
-    let capacity = data.capacity() / 2;
+    let len = data.len() / size;
+    let capacity = data.capacity() / size;
     let mut data = std::mem::ManuallyDrop::new(data);
-    let ptr = data.as_mut_ptr() as *mut i16;
+    let ptr = data.as_mut_ptr() as *mut T;
     Ok(unsafe { Vec::from_raw_parts(ptr, len, capacity) })
 }
 
+/// Converts raw bytes to `Vec<T>` with endianness handling.
+/// Zero-copy when endianness matches native; in-place byte swap otherwise.
+#[inline]
+fn bytes_to_vec<T: Copy>(mut data: Vec<u8>, endian: Endian) -> ZarrResult<Vec<T>> {
+    let size = std::mem::size_of::<T>();
+    if size == 1 {
+        // bool, i8, u8: endian irrelevant
+        return vec_u8_into_vec(data);
+    }
+    let needs_swap = match endian {
+        Endian::Little | Endian::NotApplicable => cfg!(target_endian = "big"),
+        Endian::Big => cfg!(target_endian = "little"),
+    };
+    if needs_swap {
+        data.chunks_exact_mut(size).for_each(|c| c.reverse());
+    }
+    vec_u8_into_vec(data)
+}
+
 /// Interpret raw bytes as a typed vector according to `endian` and `dtype`.
-/// Uses zerocopy for validation and zero-allocation conversion when endianness
-/// matches the target, or in-place byte swap when it does not.
+/// Zero allocation when endianness matches native; in-place byte swap otherwise.
 pub fn bytes_to_zarr_vector(
     endian: Endian,
     dtype: DataType,
-    mut data: Vec<u8>,
+    data: Vec<u8>,
 ) -> ZarrResult<ZarrVec> {
     match dtype {
-        DataType::Int16 => {
-            // Validate layout with zerocopy (both endianness types have same layout: 2 bytes/elem)
-            Ref::<_, [little_endian::I16]>::from_bytes(data.as_slice()).map_err(|_| {
-                ZarrError::Decode(format!(
-                    "Invalid byte layout for i16: length {}",
-                    data.len()
-                ))
-            })?;
-
-            let vsv: Vec<i16> = match endian {
-                Endian::Little | Endian::NotApplicable => {
-                    #[cfg(target_endian = "little")]
-                    {
-                        // Same endian: zero-copy reinterpret
-                        vec_u8_into_vec_i16(data)?
-                    }
-                    #[cfg(target_endian = "big")]
-                    {
-                        // Need byte-swap; do in-place then transmute (no extra alloc)
-                        data.chunks_exact_mut(2).for_each(|c| c.swap(0, 1));
-                        vec_u8_into_vec_i16(data)?
-                    }
-                }
-                Endian::Big => {
-                    #[cfg(target_endian = "big")]
-                    {
-                        vec_u8_into_vec_i16(data)?
-                    }
-                    #[cfg(target_endian = "little")]
-                    {
-                        data.chunks_exact_mut(2).for_each(|c| c.swap(0, 1));
-                        vec_u8_into_vec_i16(data)?
-                    }
-                }
-            };
-            Ok(ZarrVec::VInt16(vsv))
-        }
-        _ => Err(ZarrError::Decode(format!(
-            "Unsupported data type: {dtype:?}"
+        DataType::Bool => bytes_to_vec::<bool>(data, endian).map(ZarrVec::VBool),
+        DataType::Int8 => bytes_to_vec::<i8>(data, endian).map(ZarrVec::VInt8),
+        DataType::UInt8 => bytes_to_vec::<u8>(data, endian).map(ZarrVec::VUInt8),
+        DataType::Int16 => bytes_to_vec::<i16>(data, endian).map(ZarrVec::VInt16),
+        DataType::UInt16 => bytes_to_vec::<u16>(data, endian).map(ZarrVec::VUInt16),
+        DataType::Int32 => bytes_to_vec::<i32>(data, endian).map(ZarrVec::VInt32),
+        DataType::UInt32 => bytes_to_vec::<u32>(data, endian).map(ZarrVec::VUInt32),
+        DataType::Int64 => bytes_to_vec::<i64>(data, endian).map(ZarrVec::VInt64),
+        DataType::UInt64 => bytes_to_vec::<u64>(data, endian).map(ZarrVec::VUInt64),
+        DataType::Float16 => bytes_to_vec::<f16>(data, endian).map(ZarrVec::VFloat16),
+        DataType::Float32 => bytes_to_vec::<f32>(data, endian).map(ZarrVec::VFloat32),
+        DataType::Float64 => bytes_to_vec::<f64>(data, endian).map(ZarrVec::VFloat64),
+        DataType::Complex64 => bytes_to_vec::<Complex<f32>>(data, endian).map(ZarrVec::VComplex64),
+        DataType::Complex128 => bytes_to_vec::<Complex<f64>>(data, endian).map(ZarrVec::VComplex128),
+        DataType::String | DataType::Bytes => Err(ZarrError::Decode(format!(
+            "bytes_to_zarr_vector does not support {dtype:?} (variable-length)"
         ))),
     }
 }
